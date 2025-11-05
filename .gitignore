@@ -1,0 +1,29 @@
+# Node.js dependencies
+node_modules/
+
+__pycache__/
+*.pyc
+# Logs
+logs/
+*.log
+
+# Environment variables
+.env
+.venv_trib_pref/
+.venv/
+
+# Build output
+dist/
+build/
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+
+# Temporary files
+*.tmp
+*.swp
