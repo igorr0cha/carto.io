@@ -156,6 +156,6 @@ Os logs de erro são salvos em logs/erros_scraping.log para facilitar a análise
 
 ---
 
-#📄 Licença
+# 📄 Licença
 Este projeto é de uso interno e não possui licença pública. Todos os direitos reservados.
 ```
