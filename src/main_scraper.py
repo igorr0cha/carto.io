@@ -1,6 +1,7 @@
 import logging
 import sys
 import time
+from collections import defaultdict
 from db import get_db_connection
 
 # Selenium Imports
@@ -12,6 +13,7 @@ from selenium.common.exceptions import (
     TimeoutException,
     NoSuchElementException,
     WebDriverException,
+    UnexpectedAlertPresentException,  # Mais específico para alertas
 )
 
 # --- Configurações ---
@@ -19,6 +21,40 @@ URL_ALVO = "https://ridigital.org.br/CartorioNacional/CartorioNacional.aspx"
 TABLE_NAME = "cartorios_enriquecidos"
 LOG_FILE = "logs/scraper.log"
 DEFAULT_NOT_FOUND_TEXT = "Não informado"
+STATUS_CNS_NOT_FOUND = "CNS NÃO ENCONTRADO NO SITE"
+MAX_RETRIES = 3
+
+# Novo: Set com todas as UFs do Brasil para validação
+UFS_BRASIL = {
+    "AC",
+    "AL",
+    "AP",
+    "AM",
+    "BA",
+    "CE",
+    "DF",
+    "ES",
+    "GO",
+    "MA",
+    "MT",
+    "MS",
+    "MG",
+    "PA",
+    "PB",
+    "PR",
+    "PE",
+    "PI",
+    "RJ",
+    "RN",
+    "RS",
+    "RO",
+    "RR",
+    "SC",
+    "SP",
+    "SE",
+    "TO",
+}
+
 
 # --- Configuração do Logging ---
 # Configura um logger para registrar sucessos e falhas em um arquivo.
@@ -138,13 +174,17 @@ def scrape_cns_data(driver, cns):
     else:
         data["Atribuicoes"] = atribuicoes_text
 
-    # Extrai a UF do próprio nome do cartório ou de outro campo se disponível
-    # Exemplo: "7º OFICIAL DE REGISTRO DE IMÓVEIS DA COMARCA DE CURITIBA - PR"
+    # Lógica de extração da UF aprimorada e corrigida
     nome_cartorio = data.get("NomeCartorio", "")
-    if " - " in nome_cartorio:
-        data["UF"] = nome_cartorio.split(" - ")[-1]
-    else:
-        data["UF"] = ""
+    data["UF"] = ""  # Define um valor padrão
+    if nome_cartorio:
+        # Divide o nome por espaços e hífens para pegar a última palavra
+        parts = nome_cartorio.replace("-", " ").split()
+        if parts:
+            last_part = parts[-1].strip().upper()
+            # Verifica se a última parte é uma UF válida
+            if last_part in UFS_BRASIL:
+                data["UF"] = last_part
 
     return data
 
@@ -193,54 +233,91 @@ def main():
         logging.info("Nenhum CNS para processar. Trabalho concluído.")
         return
 
-    # Configura o WebDriver (Selenium 4+ gerencia o driver automaticamente)
     options = webdriver.ChromeOptions()
     options.add_argument("--start-maximized")
-    # options.add_argument("--headless") # Descomente para rodar sem abrir janela do navegador
+    # options.add_argument("--headless")
 
-    driver = None  # Inicializa o driver como None fora do loop
+    driver = None
+    retry_counts = defaultdict(int)
 
-    for i, cns in enumerate(cns_list):
+    i = 0
+    while i < len(cns_list):
+        cns = cns_list[i]
+
+        if retry_counts[cns] >= MAX_RETRIES:
+            logging.critical(
+                f"CNS {cns}: Excedeu o limite de {MAX_RETRIES} tentativas. Pulando permanentemente."
+            )
+            # REQUERIMENTO: Não fazer nada no banco, apenas pular.
+            i += 1
+            continue
+
         try:
-            # Se o driver não existe (primeira execução ou após uma falha), crie um novo.
             if driver is None:
                 logging.info("Iniciando uma nova instância do navegador...")
                 driver = webdriver.Chrome(options=options)
 
-            logging.info(f"--- Processando {i+1}/{total}: CNS {cns} ---")
+            logging.info(
+                f"--- Processando {i+1}/{total}: CNS {cns} (Tentativa {retry_counts[cns] + 1}) ---"
+            )
             scraped_data = scrape_cns_data(driver, cns)
 
-            # Validação mínima: se não achou nome, algo deu errado.
             if (
                 not scraped_data.get("NomeCartorio")
                 or scraped_data.get("NomeCartorio") == DEFAULT_NOT_FOUND_TEXT
             ):
                 raise ValueError("Extração falhou, Nome do Cartório não encontrado.")
 
-            update_cartorio_data(cns, scraped_data)
-            time.sleep(
-                1
-            )  # Pausa de cortesia menor, pois não estamos reiniciando o browser
+            if update_cartorio_data(cns, scraped_data):
+                i += 1  # Sucesso! Avança para o próximo CNS.
+            else:
+                # Se a atualização do banco falhar, trata como um erro recuperável
+                raise Exception("Falha ao salvar os dados no banco de dados.")
+
+            time.sleep(1)
+
+        except UnexpectedAlertPresentException as e:
+            # Tratamento específico para o alerta "CNS não cadastrado"
+            if e.alert_text and "CNS não cadastrado" in e.alert_text:
+                logging.warning(
+                    f"CNS {cns}: O site informou 'CNS não cadastrado'. Pulando."
+                )
+                # REQUERIMENTO: Não fazer nada no banco, apenas pular.
+                i += 1  # Pula para o próximo CNS, sem novas tentativas.
+                try:
+                    if driver:
+                        driver.switch_to.alert.accept()
+                except Exception:
+                    pass  # Se o alerta já sumiu, ignora.
+            else:
+                # Se for outro tipo de alerta, usa a lógica de retry normal
+                logging.error(
+                    f"CNS {cns}: Alerta inesperado: {e.alert_text}. Reiniciando o driver."
+                )
+                retry_counts[cns] += 1
+                # Limpa o estado do driver após um alerta desconhecido
+                if driver:
+                    driver.quit()
+                driver = None
+                time.sleep(2)
 
         except (TimeoutException, WebDriverException, ValueError) as e:
             logging.error(
                 f"CNS {cns}: Falha no processamento. Causa: {e}. O navegador será reiniciado."
             )
+            retry_counts[cns] += 1
             if driver:
                 driver.quit()
-            driver = None  # Marca o driver como "morto" para ser recriado na próxima iteração
-            time.sleep(5)  # Pausa maior após uma falha para estabilizar
+            driver = None
+            time.sleep(5)
         except Exception as e:
-            logging.critical(
-                f"CNS {cns}: Erro crítico não relacionado ao WebDriver. Causa: {e}"
-            )
-            # Em um erro muito grave, podemos decidir parar ou apenas reiniciar o driver
+            logging.critical(f"CNS {cns}: Erro crítico. Causa: {e}")
+            retry_counts[cns] += 1
             if driver:
                 driver.quit()
             driver = None
             time.sleep(5)
 
-    # Garante que a última instância do navegador seja fechada ao final do processo
     if driver:
         logging.info("--- FIM DO PROCESSAMENTO --- Fechando navegador.")
         driver.quit()
