@@ -148,7 +148,7 @@ python src/export_to_excel.py
 
 ---
 
-#⚠️ Observações Importantes
+# ⚠️ Observações Importantes:
 Substitua [URL_DO_SEU_REPOSITORIO], SEU_SERVIDOR, SEU_BANCO_DE_TESTE, SEU_USUARIO e SUA_SENHA pelos valores reais do seu ambiente.
 Certifique-se de que o arquivo de entrada em data_input/ está no formato correto (CSV com coluna CNS).
 O scraper está configurado para respeitar os termos de uso do site-alvo. Adicione delays ou proxies conforme necessário para evitar bloqueios.
